@@ -1311,6 +1311,7 @@ body:not(:has(.drawer.open)) .edge-clear {
 
 .sec-bd {
   padding: 10px 11px 11px;
+  background: linear-gradient(180deg, var(--sec-bg), #fff 26px);
 }
 
 .chips {

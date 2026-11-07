@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.log
+
+# Node
+node_modules/
+
+# 前端构建产物（由 backend 托管，vite build 输出）
+backend/static/
+
+# 运行时数据与备份
+backend/data/itto.db
+backend/data/backups/
+backend/data/_export.json
+*.bak
+*.bak-*
+
+# 临时工作目录
+_work/
+
+# 编辑器/系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

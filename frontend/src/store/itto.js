@@ -1,6 +1,7 @@
 import { computed, reactive } from 'vue'
 import seed from '../data/seed.json'
-import { DOMAIN_COLOR, DOMAIN_EN, DOMAIN_ORDER, GROUPS } from '../lib/constants'
+import domSeed from '../data/domains.seed.json'
+import { DOMAIN_COLOR, DOMAIN_EN, DOMAIN_ORDER, GROUPS, MASTERY, NOTE_SCOPE_NAMES } from '../lib/constants'
 import { classify } from '../lib/kind'
 import { fuzzyMatch } from '../lib/fuzzy'
 
@@ -10,6 +11,7 @@ const LS_KEY = 'itto-studio-dataset-v1'
 export const state = reactive({
   procs: {},
   edges: [],
+  domains: {}, // 知识领域「定义/作用」：{ 领域名: { chapter, defn, role } }
   meta: { updatedAt: null, rev: 0, dataFile: '' },
   status: 'loading', // loading | ready | offline
   booted: false,
@@ -18,6 +20,7 @@ export const state = reactive({
 
   /* UI */
   active: null,
+  domainView: null, // 点开的知识领域名，非空时弹出 DomainModal
   mode: 'clean', // clean | golden | change
   query: '',
   editing: false,
@@ -28,6 +31,8 @@ export const state = reactive({
   toasts: [],
   changeStep: 2,
   artifactView: null, // 点开的交付物名，非空时弹出 ArtifactModal
+  goldPeek: [], // 黄金链路模式下依次点选的过程：叠加显示它们的主要输入输出，最后一个是当前选中的
+  cleanPicks: [], // 纯净模式下依次点选的过程：与黄金链路一致，最后一个是当前选中，先点的浅色显示
 })
 
 let saveTimer = null
@@ -53,7 +58,7 @@ function persistLocal() {
   try {
     localStorage.setItem(
       LS_KEY,
-      JSON.stringify({ procs: state.procs, edges: state.edges, _updatedAt: new Date().toLocaleString() }),
+      JSON.stringify({ procs: state.procs, edges: state.edges, domains: state.domains, _updatedAt: new Date().toLocaleString() }),
     )
   } catch (e) {
     /* 忽略配额错误 */
@@ -79,6 +84,8 @@ export async function boot() {
     const data = await res.json()
     state.procs = data.procs || {}
     state.edges = data.edges || []
+    /* 领域「定义/作用」：教程种子兜底 + 服务端保存值覆盖（用户编辑优先） */
+    state.domains = { ...clone(domSeed), ...(data.domains || {}) }
     state.meta = data.meta || state.meta
     state.status = 'ready'
   } catch (e) {
@@ -86,6 +93,7 @@ export async function boot() {
     const d = local && local.procs ? local : seed
     state.procs = clone(d.procs || {})
     state.edges = clone(d.edges || [])
+    state.domains = { ...clone(domSeed), ...(d.domains || {}) }
     state.meta = {
       updatedAt: (d && d._updatedAt) || null,
       rev: 0,
@@ -110,7 +118,7 @@ export async function saveNow() {
     const res = await fetch(`${API}/itto`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ procs: state.procs, edges: state.edges }),
+      body: JSON.stringify({ procs: state.procs, edges: state.edges, domains: state.domains }),
     })
     if (!res.ok) throw new Error('save failed')
     const data = await res.json()
@@ -140,6 +148,7 @@ export async function resetDataset() {
   if (state.status === 'offline') {
     state.procs = clone(seed.procs)
     state.edges = clone(seed.edges)
+    state.domains = clone(domSeed)
     state.edited = {}
     touch()
     toast('已还原为内置原始数据', 'ok')
@@ -152,6 +161,7 @@ export async function resetDataset() {
     const fresh = await fetch(`${API}/itto`).then((r) => r.json())
     state.procs = fresh.procs
     state.edges = fresh.edges
+    state.domains = { ...clone(domSeed), ...(fresh.domains || {}) }
     state.meta = fresh.meta
     state.edited = {}
     state.saveState = 'saved'
@@ -192,6 +202,9 @@ export async function importDataset(file) {
   }
   state.procs = data.procs
   state.edges = data.edges
+  if (data.domains && typeof data.domains === 'object') {
+    state.domains = { ...clone(domSeed), ...data.domains }
+  }
   state.edited = {}
   await saveNow()
   toast(`已导入 ${Object.keys(data.procs).length} 个过程、${data.edges.length} 条关系`, 'ok')
@@ -381,6 +394,35 @@ export function closeArtifact() {
 }
 
 /* ------------------------------------------------------------------ */
+/* 知识领域「定义 / 作用」（教程 8~17 章提取，可编辑，随数据保存）        */
+/* ------------------------------------------------------------------ */
+
+/** 领域详情：教程种子兜底 + 已保存值覆盖（用户清空过的字段尊重用户值） */
+export function domainInfo(name) {
+  return { ...(domSeed[name] || {}), ...(state.domains[name] || {}) }
+}
+
+export function openDomain(name) {
+  state.domainView = name
+}
+
+export function closeDomain() {
+  state.domainView = null
+}
+
+/** 保存领域「定义/作用」（Markdown 原文），走统一防抖保存 */
+export function saveDomainInfo(name, defn, role) {
+  const cur = domainInfo(name)
+  state.domains[name] = {
+    chapter: cur.chapter || '',
+    defn: String(defn ?? '').trim(),
+    role: String(role ?? '').trim(),
+  }
+  touch()
+  toast(`已保存「${name}」的定义与作用`, 'ok')
+}
+
+/* ------------------------------------------------------------------ */
 /* UI 动作                                                             */
 /* ------------------------------------------------------------------ */
 function syncHash(value) {
@@ -393,8 +435,30 @@ function syncHash(value) {
 }
 
 export function select(id) {
+  /* 黄金链路模式下点过程：不跳出链路，逐个叠加/取消该过程的主要输入输出；
+   * 后点的过程排到末尾，成为「当前」高亮对象，先点的保留并降为浅色高亮 */
+  if (state.mode === 'golden') {
+    if (!id) state.goldPeek = []
+    else if (state.goldPeek.includes(id)) state.goldPeek = state.goldPeek.filter((x) => x !== id)
+    else state.goldPeek = [...state.goldPeek, id]
+    syncHash('golden')
+    return
+  }
+  /* 纯净模式：与黄金链路一致 —— 点击选中、再点取消；点其他过程时先前的降为浅色，
+   * 当前选中过程同步到 active，抽屉跟着切换 */
+  if (state.mode === 'clean') {
+    if (!id) state.cleanPicks = []
+    else if (state.cleanPicks.includes(id)) state.cleanPicks = state.cleanPicks.filter((x) => x !== id)
+    else state.cleanPicks = [...state.cleanPicks, id]
+    state.active = state.cleanPicks[state.cleanPicks.length - 1] || null
+    state.editing = false
+    syncHash(state.active || '')
+    return
+  }
   /* 变更闭环模式下点过程：保持闭环聚焦，只高亮该过程，不跳出 */
   if (state.mode !== 'clean' && state.mode !== 'change') state.mode = 'clean'
+  state.goldPeek = []
+  state.cleanPicks = []
   state.active = id || null
   state.editing = false
   syncHash(id || '')
@@ -403,6 +467,8 @@ export function select(id) {
 export function setMode(mode) {
   state.mode = mode
   state.editing = false
+  state.goldPeek = []
+  state.cleanPicks = []
   if (mode !== 'clean') {
     state.active = null
   }
@@ -422,6 +488,96 @@ export function initFromHash() {
 
 export function toggleEditing() {
   state.editing = !state.editing
+}
+
+/* ---- 学习笔记列表 / 掌握程度：随过程数据一起保存 ---- */
+function nowStr() {
+  const d = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/** 应用范围：只保留合法值并按固定顺序去重（综合 → 案例 → 论文） */
+export function normScopes(raw) {
+  if (!Array.isArray(raw)) return []
+  const set = new Set(raw.map((x) => String(x ?? '').trim()))
+  return NOTE_SCOPE_NAMES.filter((name) => set.has(name))
+}
+
+/** 新增一条笔记：text 文本、mastery 保存时选的掌握程度（0 = 不设置）；记录时间由这里生成 */
+export function addNote(id, text, masteryLevel, scopes = []) {
+  const p = state.procs[id]
+  const v = String(text ?? '').trim()
+  if (!p || !v) return
+  const now = nowStr()
+  const item = { text: v, at: now }
+  if (masteryLevel) {
+    item.mastery = { level: masteryLevel, at: now }
+    item.mAt = now
+  }
+  const scope = normScopes(scopes)
+  if (scope.length) item.scope = scope
+  if (!Array.isArray(p.notes)) p.notes = []
+  p.notes.push(item)
+  if (masteryLevel) pushMasteryHistory(p, masteryLevel, now)
+  touch()
+}
+
+/** 编辑第 i 条笔记：旧内容进 his 快照（带时间），text/mastery/scope 更新为新值 */
+export function editNote(id, i, text, masteryLevel, scopes = []) {
+  const p = state.procs[id]
+  if (!p || !Array.isArray(p.notes)) return
+  const n = p.notes[i]
+  const v = String(text ?? '').trim()
+  if (!n || !v) return
+  const now = nowStr()
+  if (!Array.isArray(n.his)) n.his = []
+  const snap = { text: n.text, at: now }
+  if (n.mastery) snap.mastery = { ...n.mastery }
+  if (Array.isArray(n.scope) && n.scope.length) snap.scope = [...n.scope]
+  n.his.push(snap)
+  n.text = v
+  if (masteryLevel) {
+    const prevLv = n.mastery?.level
+    n.mastery = { level: masteryLevel, at: now }
+    n.mAt = now
+    if (prevLv !== masteryLevel) pushMasteryHistory(p, masteryLevel, now)
+  }
+  const scope = normScopes(scopes)
+  if (scope.length) n.scope = scope
+  else delete n.scope
+  touch()
+}
+
+/** 删除第 i 条笔记 */
+export function delNote(id, i) {
+  const p = state.procs[id]
+  if (!p || !Array.isArray(p.notes)) return
+  p.notes.splice(i, 1)
+  if (!p.notes.length) delete p.notes
+  touch()
+}
+
+/** 掌握程度变更轨迹：只记级别变化，最多保留 50 条 */
+function pushMasteryHistory(p, level, at) {
+  const h = p.mHistory || []
+  if (h.length && h[h.length - 1].level === level) return
+  h.push({ level, at })
+  if (h.length > 50) h.splice(0, h.length - 50)
+  p.mHistory = h
+}
+
+/** 直接设置过程掌握程度（头部徽标入口），不需要写笔记；0 = 待学习（显式改回也保留 mNote，覆盖笔记里的旧级别）；变更记入 mHistory */
+export function setProcMastery(id, level) {
+  const p = state.procs[id]
+  if (!p) return
+  const now = nowStr()
+  const lv = MASTERY.some((m) => m.level === level) ? level : 0
+  p.mNote = { level: lv, at: now }
+  if (!p.mHistory?.length || p.mHistory[p.mHistory.length - 1].level !== lv) {
+    pushMasteryHistory(p, lv, now)
+  }
+  touch()
 }
 
 export function markEdited(id) {
@@ -651,6 +807,10 @@ export function useItto() {
     artifactRelations,
     openArtifact,
     closeArtifact,
+    domainInfo,
+    openDomain,
+    closeDomain,
+    saveDomainInfo,
     boot,
     saveNow,
     resetDataset,
@@ -659,6 +819,10 @@ export function useItto() {
     select,
     setMode,
     toggleEditing,
+    addNote,
+    editNote,
+    delNote,
+    setProcMastery,
     addInput,
     delInput,
     addOutput,

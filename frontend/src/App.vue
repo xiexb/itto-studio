@@ -2,11 +2,12 @@
 import { computed, onBeforeUnmount, onMounted } from 'vue'
 import AppHeader from './components/AppHeader.vue'
 import ArtifactModal from './components/ArtifactModal.vue'
+import DomainModal from './components/DomainModal.vue'
 import MatrixBoard from './components/MatrixBoard.vue'
 import DetailDrawer from './components/DetailDrawer.vue'
 import ChangeFlow from './components/ChangeFlow.vue'
 import ToastHost from './components/ToastHost.vue'
-import { boot, closeArtifact, initFromHash, saveNow, select, state } from './store/itto'
+import { boot, closeArtifact, closeDomain, initFromHash, saveNow, select, state } from './store/itto'
 
 const drawerOpen = computed(() => !!state.active)
 
@@ -15,6 +16,7 @@ function onKey(e) {
   const typing = tag === 'input' || tag === 'textarea'
   if (e.key === 'Escape' && !typing) {
     if (state.artifactView) closeArtifact()
+    else if (state.domainView) closeDomain()
     else select(null)
   }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
@@ -65,7 +67,7 @@ onBeforeUnmount(() => {
                 <i class="lg lg-in"></i>绿色＝上游给我输入
                 <i class="lg lg-out"></i>蓝色＝我的输出去向
                 <i class="lg lg-plan"></i>虚线＝计划 / 基准 / 绩效等通用流转
-                <i class="lg lg-flow"></i>光点方向＝数据流方向
+                <i class="lg lg-flow"></i>流动箭头＝数据流方向（细流为光点）
               </span>
             </div>
             <div class="foot-item">
@@ -81,5 +83,6 @@ onBeforeUnmount(() => {
 
     <ToastHost />
     <ArtifactModal />
+    <DomainModal />
   </div>
 </template>

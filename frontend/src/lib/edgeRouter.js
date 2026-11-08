@@ -7,11 +7,15 @@
  *  3. 同列相邻 → 端口到端口的竖直连线；同列远距离 → 右侧通道，
  *     通道按「跨度最长在外侧」分配车道，多条线不再叠成一根粗线；
  *  4. 跨列 → 三次贝塞尔曲线，箭头角度对齐曲线末端切线；
- *  5. 同行跨列且中间隔着其它卡片 → 从行上方 / 下方的水平通道绕行，
- *     车道按「跨度越长离卡片越远」嵌套展开，避免长线压穿中间卡片或与短线重叠。
+ *  5. 同行跨列且中间隔着其它卡片 → 一律从行下方的水平通道绕行，
+ *     两端都走卡片宽度中点（下边出线 → 下边进线），整条线呈对称的「U」形；
+ *     车道按「跨度越长离卡片越远」嵌套展开，并整体压缩进行下方的可用空隙，
+ *     既不会压穿中间卡片，也不会压到下一行。
  */
 
 const GAP = 3
+/* 绕行车道离行边缘的最小距离：再近就会和箭头（~9px）糊在一起 */
+const LANE_MIN = 12
 
 /* ---------------- 聚合 ---------------- */
 export function aggregateEdges(edges) {
@@ -136,12 +140,11 @@ function planRoute(A, B, boxes) {
   }
   const toRight = B.cx > A.cx
   if (sameRow(A, B) && blockedInRow(boxes, A, B)) {
-    /* 同行被隔断：从行上方绕（默认）或下方绕，车道由主入口统一分配；
-     * 终点走卡片宽度中点（上/下边进线），与纵向通道的进线方式一致 */
-    const roomUp = rowRoomOf(boxes, A, B, 1)
-    const roomDown = rowRoomOf(boxes, A, B, -1)
-    const up = roomUp >= roomDown
-    return { mode: 'hrow', sides: [toRight ? 'right' : 'left', up ? 'top' : 'bottom'], toRight, up, lane: 0 }
+    /* 同行被隔断：统一从行下方绕行 —— 上方往往撞 sticky 列头或上一行卡片
+     * （首行上方根本没有卡片，roomUp 会拿到默认值 60，于是总是被判成「从上方绕」），
+     * 下方是行间空隙，走线更干净。两端都走卡片宽度中点（下边出线 → 下边进线），
+     * 与纵向通道的进出线方式一致；车道偏移由主入口按可用空隙统一分配 */
+    return { mode: 'hrow', sides: ['bottom', 'bottom'], toRight, up: false, lane: 0 }
   }
   return { mode: 's', sides: [toRight ? 'right' : 'left', toRight ? 'left' : 'right'], toRight }
 }
@@ -253,29 +256,29 @@ function pathChannel(it) {
 const r = (n) => Math.round(n * 10) / 10
 
 /**
- * 同行绕行通道：出发端口 → 竖向爬升到行外车道 → 水平越过中间卡片 → 从目标卡片宽度中点竖直落入。
- * 车道 y = 行边缘 ± (14 + lane*11)，跨度长的边在外侧车道，嵌套展开互不交叠。
+ * 同行绕行通道：从出发卡片宽度中点竖直落到行下方车道 → 水平越过中间卡片 → 从目标卡片宽度中点竖直升入。
+ * 车道偏移 laneOff 由主入口按「行下方可用空隙」分配，跨度长的边在外侧车道，嵌套展开互不交叠。
  */
 function pathRowChannel(it) {
   const { A, B, route } = it
   const up = route.up
   const dir = up ? -1 : 1
-  const toRight = route.toRight
-  const start = anchor(A, toRight ? 'right' : 'left', it.offA)
+  /* 出发点同样走卡片宽度中点：出线边与进线边一致，不再从侧边端口斜插出去 */
+  const start = anchor(A, up ? 'top' : 'bottom', it.offA)
   const end = anchor(B, up ? 'top' : 'bottom', it.offB)
 
   const rowTop = Math.min(A.y, B.y)
   const rowBottom = Math.max(A.y + A.h, B.y + B.h)
   const edgeY = up ? rowTop : rowBottom
-  /* 基础抬高量：车道离行边缘至少 22px，视觉上比箭头（~9px）明显高一截 */
-  const chY = edgeY + dir * (22 + (it.lane || 0) * 11)
+  const laneOff = it.laneOff !== undefined ? it.laneOff : 22 + (it.lane || 0) * 11
+  const chY = edgeY + dir * laneOff
 
   const dyA = Math.abs(chY - start.y)
   const dyB = Math.abs(chY - end.y)
   if (dyA < 8 && dyB < 8) return null
 
-  /* 起终点的水平行进方向：从 start 面向 end */
-  const sx = toRight ? 1 : -1
+  /* 起终点的水平行进方向：从 start 面向 end（两端都是宽度中点，直接比坐标最稳） */
+  const sx = end.x >= start.x ? 1 : -1
   const rA = Math.max(4, Math.min(12, dyA / 2 - 1))
   const rB = Math.max(4, Math.min(12, dyB / 2 - 1))
 
@@ -305,13 +308,24 @@ function tangentOf(d) {
 }
 
 /* ---------------- 颜色 ---------------- */
-function colorKeyOf(pair, mode, active) {
-  if (mode === 'gold') return 'gold'
+function colorKeyOf(pair, mode, active, kind) {
+  if (mode === 'gold' || mode === 'golden') {
+    /* 黄金链路模式下点选过程叠加的主要输入输出：沿用绿/蓝方向色，与紫色链路区分；
+     * 方向以「当前点选的过程」为准，不属于当前点选的线参考它自己的点选过程 */
+    if (pair.overlay) {
+      const focus = pair.from === active || pair.to === active ? active : pair.peekOf
+      return pair.from === focus ? 'out' : 'in'
+    }
+    return 'gold'
+  }
   if (mode === 'change') {
     const art = pair.arts[0] ? pair.arts[0].name : ''
     return /^批准/.test(art) ? 'chga' : 'chg'
   }
-  return pair.from === active ? 'out' : 'in'
+  /* 纯净模式：颜色 = 连线类型 × 方向 双色（深=输入、亮=输出），与顶部图例 chip 同源；
+   * 先前点选过程的关系以它自己的点选过程判断方向 */
+  const focus = active && (pair.from === active || pair.to === active) ? active : pair.peekOf || active
+  return pair.from === focus ? kind + '-out' : kind + '-in'
 }
 
 /* ---------------- 主入口 ---------------- */
@@ -358,19 +372,28 @@ export function layoutEdges(pairs, boxes, opts = {}) {
     })
   }
 
-  /* 同行绕行车道：同一行同方向的绕行线共享车道带，跨度最长在外侧 */
+  /* 同行绕行车道：同一行的绕行线共享行下方通道，跨度最长在外侧；
+   * 车道带整体压缩进「行下边缘 → 下一张卡片」的可用空隙，避免压到下一行 */
   const hrows = items.filter((it) => it.route.mode === 'hrow')
   const byBand = new Map()
   for (const it of hrows) {
-    const rowTop = Math.min(it.A.y, it.B.y)
-    const key = [Math.round(rowTop / 40), it.route.up ? 'u' : 'd'].join('\u0001')
+    const key = Math.round(Math.min(it.A.y, it.B.y) / 40)
     if (!byBand.has(key)) byBand.set(key, [])
     byBand.get(key).push(it)
   }
   for (const arr of byBand.values()) {
     arr.sort((p, q) => Math.abs(q.B.cx - q.A.cx) - Math.abs(p.B.cx - p.A.cx))
+    const room = Math.min(...arr.map((it) => rowRoomOf(boxArr, it.A, it.B, -1)))
+    const usable = Math.max(LANE_MIN, room - 6)
+    const n = arr.length
+    /* 期望车道 22 / 33 / 44…；空隙不够就整体下压并收窄间距，
+     * 但始终保证各车道互不重合（否则多条线会叠成一根粗线） */
+    const step = n > 1 ? Math.min(11, (usable - LANE_MIN) / (n - 1)) : 0
+    const inner = Math.min(22, Math.max(LANE_MIN, usable - (n - 1) * step))
     arr.forEach((it, i) => {
       it.lane = i
+      /* i = 0 是跨度最长的边 → 走最外侧车道 */
+      it.laneOff = inner + (n - 1 - i) * step
     })
   }
 
@@ -394,10 +417,12 @@ export function layoutEdges(pairs, boxes, opts = {}) {
       to: pair.to,
       arts: pair.arts,
       kind,
-      colorKey: colorKeyOf(pair, mode, active),
+      colorKey: colorKeyOf(pair, mode, active, kind),
       /* 变更闭环模式下选中过程：相关边高亮、无关边压暗 */
       dim: mode === 'change' && !!active && !touches,
       hi: mode === 'change' && !!active && touches,
+      /* 黄金链路模式下先前点选过程叠加的线压淡 */
+      faint: !!pair.faint,
       d: geo.d,
       end: geo.end,
       title: `${pair.from} → ${pair.to}\n${pair.arts.map((a) => a.name).join('、')}`,

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { fuzzyMatch, highlightParts } from '../lib/fuzzy'
-import { EDGE_STYLE, KIND } from '../lib/constants'
+import { EDGE_KIND_COLORS, EDGE_STYLE, KIND } from '../lib/constants'
 import { classify } from '../lib/kind'
 import {
   artifactPool,
@@ -18,14 +18,16 @@ import {
 const fileEl = ref(null)
 const showSuggest = ref(false)
 
-/* 连线类型多选项：key 与 edgeRouter 的 kind 一致 */
-const EDGE_KINDS = [
-  { key: 'main', label: '主交付物', color: '#1e293b' },
-  { key: 'change', label: '变更流转', color: '#DC2626' },
-  { key: 'plan', label: '计划/基准', color: '#7C3AED' },
-  { key: 'perf', label: '绩效数据', color: '#A16207' },
-  { key: 'data', label: '文件细流', color: '#64748B' },
-].map((k) => ({ ...k, bg: EDGE_STYLE[k.key]?.bg || 'rgba(15,23,42,.07)' }))
+/* 连线类型多选项：key 与 edgeRouter 的 kind 一致；
+ * 色样直接取 EDGE_KIND_COLORS 的 输入/输出 双色，与画布连线同源 */
+const EDGE_KINDS = Object.entries(EDGE_KIND_COLORS).map(([key, c]) => ({
+  key,
+  label: c.label,
+  color: c.color,
+  in: c.in,
+  out: c.out,
+  bg: EDGE_STYLE[key]?.bg || 'rgba(15,23,42,.07)',
+}))
 
 const hitCount = computed(() => searchState.value.procs.size)
 
@@ -73,8 +75,8 @@ const statusInfo = computed(() => {
 })
 
 const tabs = [
-  { key: 'clean', label: '纯净矩阵', hint: '点开过程才展开关系' },
-  { key: 'golden', label: '黄金链路', hint: '案例题主干' },
+  { key: 'clean', label: '纯净矩阵', hint: '点过程展开关系 · 再点收起' },
+  { key: 'golden', label: '黄金链路', hint: '案例题主干 · 点任意过程叠加其主要输入输出' },
   { key: 'change', label: '变更闭环', hint: '六步 + 影响面' },
 ]
 </script>
@@ -154,14 +156,14 @@ const tabs = [
       </div>
 
       <div class="switches">
-        <div class="kind-filter" title="勾选要显示的连线类型">
+        <div class="kind-filter" title="勾选要显示的连线类型；色样 = 输入深色 / 输出亮色，与连线实际颜色一致">
           <button
             v-for="k in EDGE_KINDS"
             :key="k.key"
             type="button"
             class="kf-chip"
             :class="{ 'is-on': state.edgeKinds[k.key] }"
-            :style="state.edgeKinds[k.key] ? { '--kc': k.color, '--kb': k.bg } : null"
+            :style="state.edgeKinds[k.key] ? { '--kc': k.color, '--kb': k.bg, '--kin': k.in, '--kout': k.out } : null"
             @click="state.edgeKinds[k.key] = !state.edgeKinds[k.key]"
           >
             <span class="kf-line" :class="'kf-' + k.key"></span>{{ k.label }}
@@ -171,7 +173,7 @@ const tabs = [
           <input v-model="state.focusDep" type="checkbox" />
           <span>聚焦依赖</span>
         </label>
-        <label class="sw" title="连线上的光点沿数据流方向移动">
+        <label class="sw" title="主交付物用箭簇、细流用光点，沿数据流方向流动">
           <input v-model="state.animate" type="checkbox" />
           <span>流向动画</span>
         </label>

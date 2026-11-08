@@ -4,10 +4,12 @@ import { computed } from 'vue'
 const props = defineProps({
   proc: { type: Object, required: true },
   active: Boolean,
+  prev: Boolean,
   up: Boolean,
   down: Boolean,
   gold: Boolean,
   hit: Boolean,
+  step: Boolean,
   dim: Boolean,
   mute: Boolean,
   badge: { type: String, default: '' },
@@ -20,11 +22,13 @@ const both = computed(() => props.up && props.down)
 
 const cls = computed(() => ({
   'is-active': props.active,
+  'is-prev': props.prev && !props.active,
   'is-up': !props.active && props.up && !props.down,
   'is-down': !props.active && props.down && !props.up,
   'is-both': !props.active && both.value,
   'is-gold': props.gold,
   'is-hit': props.hit && !props.active,
+  'is-step': props.step && !props.active,
   'is-dim': props.dim,
   'is-mute': props.mute,
 }))

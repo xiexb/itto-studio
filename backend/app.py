@@ -31,6 +31,7 @@ DATA_DIR = BASE_DIR / "data"
 DB_FILE = DATA_DIR / "itto.db"
 LEGACY_FILE = DATA_DIR / "itto.json"  # 旧版 JSON 数据源，仅用于一次性迁移
 SEED_FILE = DATA_DIR / "itto.seed.json"
+DOMAINS_SEED_FILE = DATA_DIR / "domains.seed.json"  # 知识领域「定义/作用」种子（教程 8~17 章）
 BACKUP_DIR = DATA_DIR / "backups"
 STATIC_DIR = BASE_DIR / "static"
 EXPORT_FILE = DATA_DIR / "_export.json"
@@ -39,6 +40,7 @@ MAX_BACKUPS = 40
 VALID_PHASES = ["启动", "规划", "执行", "监控", "收尾"]
 VALID_EDGE_KINDS = {"main", "plan", "perf", "data", "change"}
 ITEM_KINDS = ("ins", "outs", "insGen", "outsUpd", "tools")
+NOTE_SCOPES = ["综合", "案例", "论文"]  # 笔记应用范围（可多选）
 
 _LOCK = threading.RLock()
 
@@ -55,6 +57,9 @@ CREATE TABLE IF NOT EXISTS procs (
   tools_detail TEXT NOT NULL DEFAULT '{}',
   defn       TEXT NOT NULL DEFAULT '',
   role       TEXT NOT NULL DEFAULT '',
+  note       TEXT NOT NULL DEFAULT '',
+  mastery    TEXT NOT NULL DEFAULT '',
+  notes      TEXT NOT NULL DEFAULT '[]',
   pos        INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS items (
@@ -73,6 +78,13 @@ CREATE TABLE IF NOT EXISTS edges (
   kind TEXT NOT NULL DEFAULT 'main',
   pos  INTEGER NOT NULL,
   UNIQUE (src, dst, art)
+);
+CREATE TABLE IF NOT EXISTS domains (
+  name    TEXT PRIMARY KEY,
+  chapter TEXT NOT NULL DEFAULT '',
+  defn    TEXT NOT NULL DEFAULT '',
+  role    TEXT NOT NULL DEFAULT '',
+  pos     INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -174,12 +186,18 @@ def _write_dataset(conn: sqlite3.Connection, data: dict) -> None:
 
     procs = data.get("procs") or {}
     for pos, (name, p) in enumerate(procs.items()):
+        # 学习元数据统一存 notes 列：笔记列表 + 掌握程度轨迹/显式设置
+        learn = {k: p[k] for k in ("mHistory", "mNote") if p.get(k)}
         conn.execute(
-            "INSERT INTO procs(name, dom, phase, upd_detail, tools_detail, defn, role, pos) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO procs(name, dom, phase, upd_detail, tools_detail, defn, role, note, mastery, notes, pos) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (name, p.get("dom") or "未分类", p.get("phase") or "规划",
              json.dumps(p.get("updDetail") or {}, ensure_ascii=False),
              json.dumps(p.get("toolsDetail") or {}, ensure_ascii=False),
-             p.get("defn") or "", p.get("role") or "", pos),
+             p.get("defn") or "", p.get("role") or "",
+             p.get("note") or "",
+             json.dumps(p.get("mastery"), ensure_ascii=False) if p.get("mastery") else "",
+             json.dumps({"notes": p.get("notes") or [], **learn}, ensure_ascii=False),
+             pos),
         )
         for kind in ITEM_KINDS:
             for i, art in enumerate(p.get(kind) or []):
@@ -196,12 +214,23 @@ def _write_dataset(conn: sqlite3.Connection, data: dict) -> None:
             (src, dst, art, kind, pos),
         )
 
+    # 领域「定义/作用」：payload 未携带 domains 键时保持库中现状（兼容旧前端）
+    domains = data.get("domains")
+    if domains is not None:
+        conn.execute("DELETE FROM domains")
+        for pos, (name, d) in enumerate(domains.items()):
+            conn.execute(
+                "INSERT OR REPLACE INTO domains(name, chapter, defn, role, pos) VALUES (?,?,?,?,?)",
+                (str(name), str(d.get("chapter") or ""),
+                 str(d.get("defn") or ""), str(d.get("role") or ""), pos),
+            )
+
 
 def _read_dataset(conn: sqlite3.Connection) -> dict:
     """从库中还原前端需要的 {procs, edges} 结构，顺序完全按 pos。"""
     procs: Dict[str, dict] = {}
     for row in conn.execute("SELECT * FROM procs ORDER BY pos"):
-        procs[row["name"]] = {
+        obj = {
             "dom": row["dom"],
             "phase": row["phase"],
             "ins": [],
@@ -214,6 +243,30 @@ def _read_dataset(conn: sqlite3.Connection) -> dict:
             "defn": row["defn"] or "",
             "role": row["role"] or "",
         }
+        if row["note"]:
+            obj["note"] = row["note"]
+        if row["mastery"]:
+            try:
+                obj["mastery"] = json.loads(row["mastery"])
+            except ValueError:
+                pass
+        try:
+            learn = json.loads(row["notes"] or "{}")
+        except ValueError:
+            learn = {}
+        if not isinstance(learn, dict):
+            learn = {}
+        notes = learn.get("notes")
+        # 兼容旧格式：notes 列直接是笔记数组
+        if isinstance(learn, list):
+            notes = learn
+        if notes:
+            obj["notes"] = notes
+        if learn.get("mHistory"):
+            obj["mHistory"] = learn["mHistory"]
+        if learn.get("mNote"):
+            obj["mNote"] = learn["mNote"]
+        procs[row["name"]] = obj
     for row in conn.execute("SELECT proc, kind, name FROM items ORDER BY proc, kind, pos"):
         p = procs.get(row["proc"])
         if p is not None and row["kind"] in ITEM_KINDS:
@@ -222,7 +275,14 @@ def _read_dataset(conn: sqlite3.Connection) -> dict:
         [r["src"], r["dst"], r["art"]] + ([r["kind"]] if r["kind"] != "main" else [])
         for r in conn.execute("SELECT * FROM edges ORDER BY pos")
     ]
-    return {"procs": procs, "edges": edges}
+    domains: Dict[str, dict] = {}
+    for row in conn.execute("SELECT * FROM domains ORDER BY pos"):
+        domains[row["name"]] = {
+            "chapter": row["chapter"] or "",
+            "defn": row["defn"] or "",
+            "role": row["role"] or "",
+        }
+    return {"procs": procs, "edges": edges, "domains": domains}
 
 
 def _get_meta(conn: sqlite3.Connection, key: str, default: str = "") -> str:
@@ -247,6 +307,103 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE procs ADD COLUMN role TEXT NOT NULL DEFAULT ''")
     if "tools_detail" not in cols:
         conn.execute("ALTER TABLE procs ADD COLUMN tools_detail TEXT NOT NULL DEFAULT '{}'")
+    if "note" not in cols:
+        conn.execute("ALTER TABLE procs ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+    if "mastery" not in cols:
+        conn.execute("ALTER TABLE procs ADD COLUMN mastery TEXT NOT NULL DEFAULT ''")
+    if "notes" not in cols:
+        conn.execute("ALTER TABLE procs ADD COLUMN notes TEXT NOT NULL DEFAULT '[]'")
+    _migrate_note_to_list(conn)
+
+
+def _migrate_note_to_list(conn: sqlite3.Connection) -> None:
+    """把旧的单条 note / mastery（或裸数组 notes）迁移为新包装格式（只处理旧结构的行）。"""
+    rows = conn.execute(
+        "SELECT name, note, mastery, notes FROM procs"
+    ).fetchall()
+    for row in row_iter(rows):
+        raw = (row["notes"] or "").strip()
+        # 已是新包装格式则跳过
+        if raw.startswith("{"):
+            continue
+        old_notes = []
+        if raw and raw != "[]":
+            try:
+                v = json.loads(raw)
+                if isinstance(v, list):
+                    old_notes = v
+            except ValueError:
+                pass
+        note = (row["note"] or "").strip()
+        mastery_raw = (row["mastery"] or "").strip()
+        if not old_notes and not note and not mastery_raw:
+            continue
+        item: dict = {}
+        if old_notes:
+            item = old_notes[0]
+            if len(old_notes) > 1:
+                # 多条时保留全部，只把旧 note/mastery 排在最前
+                rest = old_notes[1:]
+            else:
+                rest = []
+        else:
+            rest = []
+        if note and not item.get("text"):
+            item["text"] = note
+        if mastery_raw and not item.get("mastery"):
+            try:
+                m = json.loads(mastery_raw)
+            except ValueError:
+                m = None
+            if isinstance(m, dict) and m.get("level") in (1, 2, 3):
+                item["mastery"] = {"level": m["level"], "at": str(m.get("at") or "")[:19]}
+                if m.get("at"):
+                    item["mAt"] = str(m.get("at"))[:19]
+        merged = []
+        if item.get("text"):
+            item.setdefault("at", (item.get("mAt") or item.get("at") or "")[:19])
+            merged.append(item)
+            merged.extend(rest)
+        conn.execute(
+            "UPDATE procs SET notes=? WHERE name=?",
+            (json.dumps({"notes": merged}, ensure_ascii=False), row["name"]),
+        )
+
+
+def row_iter(rows):
+    return rows
+
+
+def _load_domains_seed() -> Optional[dict]:
+    """读取领域种子文件（{领域名: {chapter, defn, role}} 或其 {domains: ...} 包装）。"""
+    if not DOMAINS_SEED_FILE.exists():
+        return None
+    try:
+        raw = _read_json(DOMAINS_SEED_FILE)
+    except Exception:
+        return None
+    if isinstance(raw, dict) and isinstance(raw.get("domains"), dict):
+        raw = raw["domains"]
+    return raw if isinstance(raw, dict) and raw else None
+
+
+def _seed_domains(conn: sqlite3.Connection) -> None:
+    """domains 表为空时注入教程提取的领域「定义/作用」（幂等，不覆盖用户编辑）。"""
+    row = conn.execute("SELECT COUNT(*) AS n FROM domains").fetchone()
+    if row["n"]:
+        return
+    seed = _load_domains_seed()
+    if not seed:
+        return
+    for pos, (name, d) in enumerate(seed.items()):
+        if not isinstance(d, dict):
+            continue
+        conn.execute(
+            "INSERT OR REPLACE INTO domains(name, chapter, defn, role, pos) VALUES (?,?,?,?,?)",
+            (str(name), str(d.get("chapter") or ""),
+             str(d.get("defn") or ""), str(d.get("role") or ""), pos),
+        )
+    print(f"[itto] 已注入 {len(seed)} 个知识领域的定义/作用（{DOMAINS_SEED_FILE.name}）")
 
 
 def _init_db() -> None:
@@ -258,6 +415,7 @@ def _init_db() -> None:
             with conn:
                 conn.executescript(SCHEMA)
                 _migrate_columns(conn)
+                _seed_domains(conn)
                 if not _db_is_empty(conn):
                     return
                 source: Optional[dict] = None
@@ -327,7 +485,7 @@ def normalize(payload: dict) -> tuple[dict, List[str]]:
             vals = _uniq(str(v).strip() for v in (dv or []) if str(v).strip())
             if dk and vals:
                 tools_detail[dk] = vals
-        procs[name] = {
+        proc_obj = {
             "dom": str(p.get("dom") or "未分类").strip(),
             "phase": phase,
             "ins": _uniq(str(x).strip() for x in (p.get("ins") or []) if str(x).strip()),
@@ -340,6 +498,98 @@ def normalize(payload: dict) -> tuple[dict, List[str]]:
             "defn": str(p.get("defn") or "").strip(),
             "role": str(p.get("role") or "").strip(),
         }
+        # 学习元数据：笔记与掌握程度（可选字段，非空才落盘）
+        note = str(p.get("note") or "").strip()
+        if note:
+            proc_obj["note"] = note
+        m_raw = p.get("mastery")
+        if isinstance(m_raw, dict):
+            try:
+                lv = int(m_raw.get("level"))
+            except (TypeError, ValueError):
+                lv = 0
+            if lv in (1, 2, 3):
+                proc_obj["mastery"] = {
+                    "level": lv,
+                    "at": str(m_raw.get("at") or "").strip()[:19],
+                }
+        # 笔记列表：每条 {text, at, mastery?, mAt?, his?}（mastery 为保存时的掌握程度，mAt 为其设置时间，
+        # his 为编辑前的历史快照 [{text, at, mastery?}]，最新在最后）
+        notes_raw = p.get("notes")
+        if isinstance(notes_raw, list):
+            notes: List[dict] = []
+            for n in notes_raw:
+                if not isinstance(n, dict):
+                    continue
+                text = str(n.get("text") or "").strip()
+                if not text:
+                    continue
+                item = {"text": text, "at": str(n.get("at") or "").strip()[:19]}
+                scope = _norm_scope(n.get("scope"))
+                if scope:
+                    item["scope"] = scope
+                m = n.get("mastery")
+                if isinstance(m, dict):
+                    try:
+                        mlv = int(m.get("level"))
+                    except (TypeError, ValueError):
+                        mlv = 0
+                    if mlv in (1, 2, 3):
+                        item["mastery"] = {"level": mlv, "at": str(m.get("at") or "").strip()[:19]}
+                        if n.get("mAt"):
+                            item["mAt"] = str(n.get("mAt")).strip()[:19]
+                his_raw = n.get("his")
+                if isinstance(his_raw, list):
+                    his: List[dict] = []
+                    for h in his_raw:
+                        if not isinstance(h, dict):
+                            continue
+                        ht = str(h.get("text") or "").strip()
+                        if not ht:
+                            continue
+                        hs = {"text": ht, "at": str(h.get("at") or "").strip()[:19]}
+                        hscope = _norm_scope(h.get("scope"))
+                        if hscope:
+                            hs["scope"] = hscope
+                        hm = h.get("mastery")
+                        if isinstance(hm, dict):
+                            try:
+                                hlv = int(hm.get("level"))
+                            except (TypeError, ValueError):
+                                hlv = 0
+                            if hlv in (1, 2, 3):
+                                hs["mastery"] = {"level": hlv, "at": str(hm.get("at") or "").strip()[:19]}
+                        his.append(hs)
+                    if his:
+                        item["his"] = his
+                notes.append(item)
+            if notes:
+                proc_obj["notes"] = notes
+        # 掌握程度独立变更轨迹 [{level, at}]（level 0 = 待学习默认态；最新在最后）
+        mh_raw = p.get("mHistory")
+        if isinstance(mh_raw, list):
+            mhist: List[dict] = []
+            for h in mh_raw:
+                if not isinstance(h, dict):
+                    continue
+                try:
+                    hlv = int(h.get("level"))
+                except (TypeError, ValueError):
+                    continue
+                if hlv in (0, 1, 2, 3):
+                    mhist.append({"level": hlv, "at": str(h.get("at") or "").strip()[:19]})
+            if mhist:
+                proc_obj["mHistory"] = mhist
+        # 掌握程度显式设置（头部徽标直接修改，不经过笔记）{level, at}
+        mn_raw = p.get("mNote")
+        if isinstance(mn_raw, dict):
+            try:
+                mlv2 = int(mn_raw.get("level"))
+            except (TypeError, ValueError):
+                mlv2 = -1
+            if mlv2 in (0, 1, 2, 3):
+                proc_obj["mNote"] = {"level": mlv2, "at": str(mn_raw.get("at") or "").strip()[:19]}
+        procs[name] = proc_obj
 
     edges: List[List[Any]] = []
     seen = set()
@@ -376,7 +626,22 @@ def normalize(payload: dict) -> tuple[dict, List[str]]:
             repaired.append(f"{dst}: 补记输入「{art}」")
         edges.append([src, dst, art] + ([kind] if kind != "main" else []))
 
-    return {"procs": procs, "edges": edges}, repaired
+    # 知识领域「定义/作用」：仅在 payload 显式携带 domains 时更新（None = 不动库中现状）
+    domains: Optional[Dict[str, dict]] = None
+    domains_in = payload.get("domains")
+    if isinstance(domains_in, dict):
+        domains = {}
+        for dname, d in domains_in.items():
+            dname = str(dname).strip()
+            if not dname or not isinstance(d, dict):
+                continue
+            domains[dname] = {
+                "chapter": str(d.get("chapter") or "").strip(),
+                "defn": str(d.get("defn") or "").strip(),
+                "role": str(d.get("role") or "").strip(),
+            }
+
+    return {"procs": procs, "edges": edges, "domains": domains}, repaired
 
 
 def _uniq(seq) -> List[str]:
@@ -388,8 +653,19 @@ def _uniq(seq) -> List[str]:
     return out
 
 
+def _norm_scope(raw) -> List[str]:
+    """笔记应用范围：只保留合法值，按固定顺序去重（综合 → 案例 → 论文）。"""
+    if not isinstance(raw, list):
+        return []
+    chosen = {str(x).strip() for x in raw}
+    return [s for s in NOTE_SCOPES if s in chosen]
+
+
 def _stats(ds: dict) -> dict:
-    return {"procs": len(ds.get("procs", {})), "edges": len(ds.get("edges", []))}
+    s = {"procs": len(ds.get("procs", {})), "edges": len(ds.get("edges", []))}
+    if ds.get("domains") is not None:
+        s["domains"] = len(ds["domains"])
+    return s
 
 
 def _rev(conn: sqlite3.Connection) -> int:
@@ -440,6 +716,7 @@ def get_itto() -> JSONResponse:
         return JSONResponse({
             "procs": ds["procs"],
             "edges": ds["edges"],
+            "domains": ds.get("domains") or {},
             "meta": {
                 "updatedAt": _get_meta(conn, "updated_at") or None,
                 "rev": _rev(conn),
@@ -481,6 +758,11 @@ def reset_itto() -> dict:
     with _LOCK:
         backup = _backup("reset")
         seed = _read_json(SEED_FILE)
+        # 还原时一并恢复领域「定义/作用」种子（itto.seed.json 里没有 domains 时）
+        if not isinstance(seed.get("domains"), dict):
+            dseed = _load_domains_seed()
+            if dseed:
+                seed["domains"] = dseed
         clean, _ = normalize(seed)
         conn = _connect()
         try:

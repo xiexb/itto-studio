@@ -18,23 +18,24 @@ export const GROUP_BG = {
   收尾: 'linear-gradient(135deg,#64748B,#334155)',
 }
 
-/* 行顺序 = 教程第十~十七章的领域顺序 */
+/* 行顺序 = 教程第八~十七章的领域顺序 */
 export const DOMAIN_META = [
-  { name: '整合管理', en: 'Integration', color: '#2563EB' },
-  { name: '范围管理', en: 'Scope', color: '#0891B2' },
-  { name: '进度管理', en: 'Schedule', color: '#7C3AED' },
-  { name: '成本管理', en: 'Cost', color: '#CA8A04' },
-  { name: '质量管理', en: 'Quality', color: '#DB2777' },
-  { name: '资源管理', en: 'Resource', color: '#059669' },
-  { name: '沟通管理', en: 'Communication', color: '#C026D3' },
-  { name: '风险管理', en: 'Risk', color: '#DC2626' },
-  { name: '采购管理', en: 'Procurement', color: '#EA580C' },
-  { name: '干系人管理', en: 'Stakeholder', color: '#4F46E5' },
+  { name: '整合管理', en: 'Integration', chapter: '第8章', color: '#2563EB' },
+  { name: '范围管理', en: 'Scope', chapter: '第9章', color: '#0891B2' },
+  { name: '进度管理', en: 'Schedule', chapter: '第10章', color: '#7C3AED' },
+  { name: '成本管理', en: 'Cost', chapter: '第11章', color: '#CA8A04' },
+  { name: '质量管理', en: 'Quality', chapter: '第12章', color: '#DB2777' },
+  { name: '资源管理', en: 'Resource', chapter: '第13章', color: '#059669' },
+  { name: '沟通管理', en: 'Communication', chapter: '第14章', color: '#C026D3' },
+  { name: '风险管理', en: 'Risk', chapter: '第15章', color: '#DC2626' },
+  { name: '采购管理', en: 'Procurement', chapter: '第16章', color: '#EA580C' },
+  { name: '干系人管理', en: 'Stakeholder', chapter: '第17章', color: '#4F46E5' },
 ]
 
 export const DOMAIN_ORDER = DOMAIN_META.map(d => d.name)
 export const DOMAIN_COLOR = Object.fromEntries(DOMAIN_META.map(d => [d.name, d.color]))
 export const DOMAIN_EN = Object.fromEntries(DOMAIN_META.map(d => [d.name, d.en]))
+export const DOMAIN_CHAPTER = Object.fromEntries(DOMAIN_META.map(d => [d.name, d.chapter]))
 
 /* ---------------- 交付物类型 ---------------- */
 export const KIND = {
@@ -63,13 +64,49 @@ export const EDGE_STYLE = {
   data:   { width: 1.4, dash: '3 4.5',   opacity: 0.75, label: '项目文件细流', bg: 'rgba(100,116,139,.1)' },
 }
 
+/* 连线类型 × 方向 双色系统：深色＝输入（流向选中过程），亮色＝输出（从选中过程流出）。
+ * 每类保持自己的色相家族，方向用明度区分 —— 顶部图例 chip 的色样与画布连线同源 */
+export const EDGE_KIND_COLORS = {
+  main:   { label: '主交付物', color: '#1E293B', in: '#059669', out: '#2563EB', flowIn: '#34D399', flowOut: '#93C5FD', h: 2.6 },
+  change: { label: '变更流转', color: '#DC2626', in: '#B91C1C', out: '#F97316', flowIn: '#FCA5A5', flowOut: '#FDBA74', h: 2.3 },
+  plan:   { label: '计划/基准', color: '#7C3AED', in: '#6D28D9', out: '#A78BFA', flowIn: '#C4B5FD', flowOut: '#DDD6FE', h: 1.7 },
+  perf:   { label: '绩效数据', color: '#A16207', in: '#713F12', out: '#FBBF24', flowIn: '#A16207', flowOut: '#FDE68A', h: 1.4 },
+  data:   { label: '文件细流', color: '#64748B', in: '#475569', out: '#94A3B8', flowIn: '#64748B', flowOut: '#CBD5E1', h: 1.4 },
+}
+
+/* 连线配色：kind-in / kind-out 键由 EDGE_KIND_COLORS 生成，与图例永远同源；
+ * in/out 绿蓝双色保留给黄金链路点选叠加，chg/chga 给变更闭环模式 */
 export const EDGE_PALETTE = {
-  out:  { stroke: '#2563EB', flow: '#93C5FD', name: '输出' },
-  in:   { stroke: '#059669', flow: '#6EE7B7', name: '输入' },
+  out:  { stroke: '#2563EB', flow: '#60A5FA', name: '输出' },
+  in:   { stroke: '#059669', flow: '#34D399', name: '输入' },
   gold: { stroke: '#7C3AED', flow: '#C4B5FD', name: '黄金链路' },
   chg:  { stroke: '#DC2626', flow: '#FCA5A5', name: '变更请求' },
   chga: { stroke: '#B91C1C', flow: '#FCA5A5', name: '批准的变更' },
 }
+for (const [k, c] of Object.entries(EDGE_KIND_COLORS)) {
+  EDGE_PALETTE[k + '-in'] = { stroke: c.in, flow: c.flowIn, name: c.label + ' · 输入' }
+  EDGE_PALETTE[k + '-out'] = { stroke: c.out, flow: c.flowOut, name: c.label + ' · 输出' }
+}
+
+/* 学习掌握程度：按过程记录（含设置时间），随 ITTO 数据一起保存。
+ * level 0「待学习」是默认状态，未设置时展示即为此级 */
+export const MASTERY = [
+  { level: 0, label: '待学习', stars: '☆', color: '#64748B', bg: '#F1F5F9', bd: '#D8E1EC' },
+  { level: 1, label: '待巩固', stars: '★', color: '#B91C1C', bg: '#FEF2F2', bd: '#FECACA' },
+  { level: 2, label: '熟悉', stars: '★★', color: '#B45309', bg: '#FFFBEB', bd: '#FDE68A' },
+  { level: 3, label: '已掌握', stars: '★★★', color: '#047857', bg: '#ECFDF5', bd: '#A7F3D0' },
+]
+export const MASTERY_DEFAULT = 0
+export const masteryOf = (lv) => MASTERY.find((m) => m.level === lv) || MASTERY[0]
+
+/* 笔记应用范围：可多选，用于标记这条笔记服务于哪类题型/场景 */
+export const NOTE_SCOPES = [
+  { name: '综合', color: '#2563EB', bg: '#EFF6FF', bd: '#BFDBFE' },
+  { name: '案例', color: '#047857', bg: '#ECFDF5', bd: '#A7F3D0' },
+  { name: '论文', color: '#7C3AED', bg: '#F5F3FF', bd: '#DDD6FE' },
+]
+export const NOTE_SCOPE_NAMES = NOTE_SCOPES.map((s) => s.name)
+export const scopeOf = (name) => NOTE_SCOPES.find((s) => s.name === name) || null
 
 /* 黄金链路：案例题主干 */
 export const GOLDEN = [
